@@ -5,7 +5,7 @@ CONFIG_NVMEVIRT_NVM := y
 #CONFIG_NVMEVIRT_KV := y
 
 obj-m   := nvmev.o
-nvmev-objs := main.o pci.o admin.o io.o dma.o
+nvmev-objs := main.o pci.o admin.o io.o dma.o perf_model.o
 ccflags-y += -Wno-unused-variable -Wno-unused-function
 
 ccflags-$(CONFIG_NVMEVIRT_NVM) += -DBASE_SSD=INTEL_OPTANE
