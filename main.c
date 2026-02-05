@@ -350,17 +350,21 @@ static int __proc_file_read(struct seq_file *m, void *data)
 		if (ret) {
 			seq_printf(m, "error: %d\n", ret);
 		} else {
-			seq_printf(m, "read_iops=%llu write_iops=%llu\n",
-				   perf.read_iops, perf.write_iops);
-			seq_printf(m, "read_completed=%llu write_completed=%llu\n",
-				   perf.read_completed, perf.write_completed);
-			seq_printf(m, "read_duration_ns=%llu write_duration_ns=%llu\n",
-				   perf.read_duration_ns, perf.write_duration_ns);
+			seq_printf(m, "read_iops=%llu write_iops=%llu erase_iops=%llu\n",
+				   perf.read_iops, perf.write_iops, perf.erase_iops);
 			seq_printf(m,
-				   "cfg: cmd_overhead_ns=%llu tr_ns=%llu tprog_ns=%llu chan_speed_mt=%u ecc_parity=%u qd=%u chan_num=%u die_num=%u planes=%u iwl_slot=%u element=%u page_bytes=%u\n",
+				   "read_completed=%llu write_completed=%llu erase_completed=%llu\n",
+				   perf.read_completed, perf.write_completed, perf.erase_completed);
+			seq_printf(m,
+				   "read_duration_ns=%llu write_duration_ns=%llu erase_duration_ns=%llu\n",
+				   perf.read_duration_ns, perf.write_duration_ns,
+				   perf.erase_duration_ns);
+			seq_printf(m,
+				   "cfg: cmd_overhead_ns=%llu tr_ns=%llu tprog_ns=%llu terase_ns=%llu chan_speed_mt=%u ecc_parity=%u qd=%u chan_num=%u die_num=%u planes=%u iwl_slot=%u element=%u page_bytes=%u\n",
 				   (unsigned long long)NVMEV_PERF_CMD_OVERHEAD_NS,
 				   (unsigned long long)NVMEV_PERF_TR_NS,
 				   (unsigned long long)NVMEV_PERF_TPROG_NS,
+				   (unsigned long long)NVMEV_PERF_TERASE_NS,
 				   NVMEV_PERF_CHAN_SPEED_MT, NVMEV_PERF_ECC_PARITY_BYTES,
 				   NVMEV_PERF_QD, NVMEV_PERF_CHAN_NUM, NVMEV_PERF_DIE_NUM,
 				   NVMEV_PERF_PLANES, NVMEV_PERF_IWL_SLOT,
