@@ -22,6 +22,7 @@
 #include "simple_ftl.h"
 #include "kv_ftl.h"
 #include "dma.h"
+#include "perf_model.h"
 
 /****************************************************************
  * Memory Layout
@@ -343,6 +344,28 @@ static int __proc_file_read(struct seq_file *m, void *data)
 			   total_io);
 	} else if (strcmp(filename, "debug") == 0) {
 		/* Left for later use */
+	} else if (strcmp(filename, "perf") == 0) {
+		struct nvmev_perf_result perf = {};
+		int ret = nvmev_perf_run(&perf);
+		if (ret) {
+			seq_printf(m, "error: %d\n", ret);
+		} else {
+			seq_printf(m, "read_iops=%llu write_iops=%llu\n",
+				   perf.read_iops, perf.write_iops);
+			seq_printf(m, "read_completed=%llu write_completed=%llu\n",
+				   perf.read_completed, perf.write_completed);
+			seq_printf(m, "read_duration_ns=%llu write_duration_ns=%llu\n",
+				   perf.read_duration_ns, perf.write_duration_ns);
+			seq_printf(m,
+				   "cfg: cmd_overhead_ns=%llu tr_ns=%llu tprog_ns=%llu chan_speed_mt=%u ecc_parity=%u qd=%u chan_num=%u die_num=%u planes=%u iwl_slot=%u element=%u page_bytes=%u\n",
+				   (unsigned long long)NVMEV_PERF_CMD_OVERHEAD_NS,
+				   (unsigned long long)NVMEV_PERF_TR_NS,
+				   (unsigned long long)NVMEV_PERF_TPROG_NS,
+				   NVMEV_PERF_CHAN_SPEED_MT, NVMEV_PERF_ECC_PARITY_BYTES,
+				   NVMEV_PERF_QD, NVMEV_PERF_CHAN_NUM, NVMEV_PERF_DIE_NUM,
+				   NVMEV_PERF_PLANES, NVMEV_PERF_IWL_SLOT,
+				   NVMEV_PERF_ELEMENT, NVMEV_PERF_PAGE_BYTES);
+		}
 	}
 
 	return 0;
@@ -449,6 +472,7 @@ static void NVMEV_STORAGE_INIT(struct nvmev_dev *nvmev_vdev)
 		proc_create("io_units", 0664, nvmev_vdev->proc_root, &proc_file_fops);
 	nvmev_vdev->proc_stat = proc_create("stat", 0444, nvmev_vdev->proc_root, &proc_file_fops);
 	nvmev_vdev->proc_debug = proc_create("debug", 0444, nvmev_vdev->proc_root, &proc_file_fops);
+	nvmev_vdev->proc_perf = proc_create("perf", 0444, nvmev_vdev->proc_root, &proc_file_fops);
 }
 
 static void NVMEV_STORAGE_FINAL(struct nvmev_dev *nvmev_vdev)
@@ -458,6 +482,7 @@ static void NVMEV_STORAGE_FINAL(struct nvmev_dev *nvmev_vdev)
 	remove_proc_entry("io_units", nvmev_vdev->proc_root);
 	remove_proc_entry("stat", nvmev_vdev->proc_root);
 	remove_proc_entry("debug", nvmev_vdev->proc_root);
+	remove_proc_entry("perf", nvmev_vdev->proc_root);
 
 	remove_proc_entry("nvmev", NULL);
 
