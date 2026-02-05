@@ -21,6 +21,7 @@ enum nvmev_perf_slot_state {
 	NVMEV_SLOT_EMPTY = 0,
 	NVMEV_SLOT_WAIT_DATA,
 	NVMEV_SLOT_WAIT_PROG,
+	NVMEV_SLOT_WAIT_ERASE,
 };
 
 struct nvmev_perf_list {
@@ -38,6 +39,7 @@ struct nvmev_perf_chan {
 	int act;
 	u32 list_info;
 	u64 time;
+	u32 rr_slot;
 };
 
 struct nvmev_perf_cfg {
@@ -53,12 +55,19 @@ struct nvmev_perf_cfg {
 	u64 cmd_overhead_ns;
 	u64 tr_ns;
 	u64 tprog_ns;
+	u64 terase_ns;
 };
 
 struct nvmev_perf_run {
 	u64 iops;
 	u64 duration_ns;
 	u64 completed;
+};
+
+enum nvmev_perf_op {
+	NVMEV_PERF_READ = 0,
+	NVMEV_PERF_WRITE,
+	NVMEV_PERF_ERASE,
 };
 
 static struct nvmev_perf_cfg nvmev_perf_default_cfg(void)
@@ -76,6 +85,7 @@ static struct nvmev_perf_cfg nvmev_perf_default_cfg(void)
 		.cmd_overhead_ns = NVMEV_PERF_CMD_OVERHEAD_NS,
 		.tr_ns = NVMEV_PERF_TR_NS,
 		.tprog_ns = NVMEV_PERF_TPROG_NS,
+		.terase_ns = NVMEV_PERF_TERASE_NS,
 	};
 
 	return cfg;
@@ -119,7 +129,65 @@ static inline u64 nvmev_perf_data_time_ns(const struct nvmev_perf_cfg *cfg)
 	return div64_u64(bytes * 1000ULL, cfg->chan_speed_mt);
 }
 
-static int nvmev_perf_simulate(const struct nvmev_perf_cfg *cfg, bool is_write,
+static bool nvmev_perf_pick_cmd_list(u32 chan_id, struct nvmev_perf_chan *chan,
+				     u32 die_per_chan, u32 plane_groups,
+				     struct nvmev_perf_list *lists, u32 *list_idx,
+				     u32 *list_info)
+{
+	u32 slots = die_per_chan * plane_groups;
+	u32 start = chan->rr_slot % slots;
+	u32 offset;
+
+	for (offset = 0; offset < slots; offset++) {
+		u32 pos = (start + offset) % slots;
+		u32 die_in_chan = pos / plane_groups;
+		u32 plane_idx = pos % plane_groups;
+		u32 idx = nvmev_perf_list_index(chan_id, die_in_chan, plane_idx,
+						die_per_chan, plane_groups);
+		struct nvmev_perf_list *list = &lists[idx];
+
+		if (!list->empty && list->act == NVMEV_PERF_ACT_INVALID) {
+			*list_idx = idx;
+			*list_info = (die_in_chan << 16) | plane_idx;
+			chan->rr_slot = (pos + 1) % slots;
+			return true;
+		}
+	}
+
+	return false;
+}
+
+static bool nvmev_perf_pick_data_list(u32 chan_id, struct nvmev_perf_chan *chan,
+				      u32 die_per_chan, u32 plane_groups,
+				      struct nvmev_perf_list *lists, u64 sim_time,
+				      u32 *list_idx, u32 *list_info)
+{
+	u32 slots = die_per_chan * plane_groups;
+	u32 start = chan->rr_slot % slots;
+	u32 offset;
+
+	for (offset = 0; offset < slots; offset++) {
+		u32 pos = (start + offset) % slots;
+		u32 die_in_chan = pos / plane_groups;
+		u32 plane_idx = pos % plane_groups;
+		u32 idx = nvmev_perf_list_index(chan_id, die_in_chan, plane_idx,
+						die_per_chan, plane_groups);
+		struct nvmev_perf_list *list = &lists[idx];
+
+		if (list->act != NVMEV_PERF_ACT_INVALID &&
+		    list->state == NVMEV_SLOT_WAIT_DATA &&
+		    list->ready_time <= sim_time) {
+			*list_idx = idx;
+			*list_info = (die_in_chan << 16) | plane_idx;
+			chan->rr_slot = (pos + 1) % slots;
+			return true;
+		}
+	}
+
+	return false;
+}
+
+static int nvmev_perf_simulate(const struct nvmev_perf_cfg *cfg, enum nvmev_perf_op op,
 			       struct nvmev_perf_run *run)
 {
 	struct nvmev_perf_list *lists = NULL;
@@ -138,6 +206,9 @@ static int nvmev_perf_simulate(const struct nvmev_perf_cfg *cfg, bool is_write,
 	u32 list_count;
 	u64 data_time_ns;
 	u32 xor_ratio;
+	bool is_write = (op == NVMEV_PERF_WRITE);
+	bool is_read = (op == NVMEV_PERF_READ);
+	bool is_erase = (op == NVMEV_PERF_ERASE);
 	int ret = 0;
 	u32 i;
 
@@ -192,8 +263,10 @@ static int nvmev_perf_simulate(const struct nvmev_perf_cfg *cfg, bool is_write,
 		lists[i].ready_time = 0;
 		lists[i].queue = queue_mem + (size_t)i * cfg->iwl_slot;
 	}
-	for (i = 0; i < cfg->chan_num; i++)
+	for (i = 0; i < cfg->chan_num; i++) {
 		chans[i].state = NVMEV_CHAN_IDLE;
+		chans[i].rr_slot = 0;
+	}
 
 	if (cfg->qd >= 512)
 		tmp_cmd_cnt = (cfg->qd * 3) / 4;
@@ -258,8 +331,13 @@ static int nvmev_perf_simulate(const struct nvmev_perf_cfg *cfg, bool is_write,
 								 die_per_chan, plane_groups);
 				list = &lists[list_idx];
 				list->act = chan->act;
-				list->state = NVMEV_SLOT_WAIT_DATA;
-				list->ready_time = sim_time + (is_write ? 0 : cfg->tr_ns);
+				if (is_erase) {
+					list->state = NVMEV_SLOT_WAIT_ERASE;
+					list->ready_time = sim_time + cfg->terase_ns;
+				} else {
+					list->state = NVMEV_SLOT_WAIT_DATA;
+					list->ready_time = sim_time + (is_read ? cfg->tr_ns : 0);
+				}
 				chan->state = NVMEV_CHAN_IDLE;
 				chan->act = NVMEV_PERF_ACT_INVALID;
 				chan->list_info = 0xFFFFFFFF;
@@ -307,54 +385,54 @@ static int nvmev_perf_simulate(const struct nvmev_perf_cfg *cfg, bool is_write,
 			}
 		}
 
+		if (is_erase) {
+			u32 idx;
+
+			for (idx = 0; idx < list_count; idx++) {
+				if (lists[idx].act != NVMEV_PERF_ACT_INVALID &&
+				    lists[idx].state == NVMEV_SLOT_WAIT_ERASE &&
+				    lists[idx].ready_time <= sim_time) {
+					act_map[lists[idx].act] = 0;
+					inflight--;
+					total_cmd++;
+					lists[idx].act = NVMEV_PERF_ACT_INVALID;
+					lists[idx].state = NVMEV_SLOT_EMPTY;
+					progress = true;
+				}
+			}
+		}
+
 		/* Schedule new CMD/DATA on idle channels. */
 		for (i = 0; i < cfg->chan_num; i++) {
 			struct nvmev_perf_chan *chan = &chans[i];
-			u32 j, k;
-			bool scheduled = false;
+			u32 list_idx;
+			u32 list_info;
+			struct nvmev_perf_list *list;
 
 			if (chan->state != NVMEV_CHAN_IDLE)
 				continue;
 
-			for (j = 0; j < die_per_chan && !scheduled; j++) {
-				for (k = 0; k < plane_groups; k++) {
-					u32 idx = nvmev_perf_list_index(i, j, k,
-									die_per_chan, plane_groups);
-					struct nvmev_perf_list *list = &lists[idx];
-
-					if (!list->empty && list->act == NVMEV_PERF_ACT_INVALID) {
-						chan->state = NVMEV_CHAN_CMD;
-						chan->time = sim_time + cfg->cmd_overhead_ns;
-						chan->act = nvmev_perf_queue_pop(list, cfg->iwl_slot);
-						chan->list_info = (j << 16) | k;
-						scheduled = true;
-						progress = true;
-						break;
-					}
-				}
+			if (nvmev_perf_pick_cmd_list(i, chan, die_per_chan,
+						     plane_groups, lists, &list_idx,
+						     &list_info)) {
+				list = &lists[list_idx];
+				chan->state = NVMEV_CHAN_CMD;
+				chan->time = sim_time + cfg->cmd_overhead_ns;
+				chan->act = nvmev_perf_queue_pop(list, cfg->iwl_slot);
+				chan->list_info = list_info;
+				progress = true;
+				continue;
 			}
 
-			if (scheduled)
-				continue;
-
-			for (j = 0; j < die_per_chan && !scheduled; j++) {
-				for (k = 0; k < plane_groups; k++) {
-					u32 idx = nvmev_perf_list_index(i, j, k,
-									die_per_chan, plane_groups);
-					struct nvmev_perf_list *list = &lists[idx];
-
-					if (list->act != NVMEV_PERF_ACT_INVALID &&
-					    list->state == NVMEV_SLOT_WAIT_DATA &&
-					    list->ready_time <= sim_time) {
-						chan->state = NVMEV_CHAN_DATA;
-						chan->time = sim_time + data_time_ns;
-						chan->act = list->act;
-						chan->list_info = (j << 16) | k;
-						scheduled = true;
-						progress = true;
-						break;
-					}
-				}
+			if (nvmev_perf_pick_data_list(i, chan, die_per_chan,
+						      plane_groups, lists, sim_time,
+						      &list_idx, &list_info)) {
+				list = &lists[list_idx];
+				chan->state = NVMEV_CHAN_DATA;
+				chan->time = sim_time + data_time_ns;
+				chan->act = list->act;
+				chan->list_info = list_info;
+				progress = true;
 			}
 		}
 
@@ -371,7 +449,8 @@ static int nvmev_perf_simulate(const struct nvmev_perf_cfg *cfg, bool is_write,
 			if (lists[i].act == NVMEV_PERF_ACT_INVALID)
 				continue;
 			if ((lists[i].state == NVMEV_SLOT_WAIT_DATA ||
-			     lists[i].state == NVMEV_SLOT_WAIT_PROG) &&
+			     lists[i].state == NVMEV_SLOT_WAIT_PROG ||
+			     lists[i].state == NVMEV_SLOT_WAIT_ERASE) &&
 			    lists[i].ready_time > sim_time) {
 				next_time = min(next_time, lists[i].ready_time);
 			}
@@ -416,25 +495,33 @@ int nvmev_perf_run(struct nvmev_perf_result *result)
 	struct nvmev_perf_cfg cfg = nvmev_perf_default_cfg();
 	struct nvmev_perf_run read_run = {};
 	struct nvmev_perf_run write_run = {};
+	struct nvmev_perf_run erase_run = {};
 	int ret;
 
 	if (!result)
 		return -EINVAL;
 
-	ret = nvmev_perf_simulate(&cfg, false, &read_run);
+	ret = nvmev_perf_simulate(&cfg, NVMEV_PERF_READ, &read_run);
 	if (ret)
 		return ret;
 
-	ret = nvmev_perf_simulate(&cfg, true, &write_run);
+	ret = nvmev_perf_simulate(&cfg, NVMEV_PERF_WRITE, &write_run);
+	if (ret)
+		return ret;
+
+	ret = nvmev_perf_simulate(&cfg, NVMEV_PERF_ERASE, &erase_run);
 	if (ret)
 		return ret;
 
 	result->read_iops = read_run.iops;
 	result->write_iops = write_run.iops;
+	result->erase_iops = erase_run.iops;
 	result->read_duration_ns = read_run.duration_ns;
 	result->write_duration_ns = write_run.duration_ns;
+	result->erase_duration_ns = erase_run.duration_ns;
 	result->read_completed = read_run.completed;
 	result->write_completed = write_run.completed;
+	result->erase_completed = erase_run.completed;
 
 	return 0;
 }

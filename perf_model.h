@@ -20,6 +20,9 @@
 #ifndef NVMEV_PERF_TPROG_NS
 #define NVMEV_PERF_TPROG_NS (200ULL * 1000ULL) /* 200 us */
 #endif
+#ifndef NVMEV_PERF_TERASE_NS
+#define NVMEV_PERF_TERASE_NS (1500ULL * 1000ULL) /* 1500 us */
+#endif
 #ifndef NVMEV_PERF_CHAN_SPEED_MT
 #define NVMEV_PERF_CHAN_SPEED_MT (2400U) /* MT/s */
 #endif
@@ -51,10 +54,13 @@
 struct nvmev_perf_result {
 	u64 read_iops;
 	u64 write_iops;
+	u64 erase_iops;
 	u64 read_duration_ns;
 	u64 write_duration_ns;
+	u64 erase_duration_ns;
 	u64 read_completed;
 	u64 write_completed;
+	u64 erase_completed;
 };
 
 int nvmev_perf_run(struct nvmev_perf_result *result);
